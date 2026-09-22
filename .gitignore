@@ -37,3 +37,7 @@ build/
 
 ### Mac OS ###
 .DS_Store
+
+### 本地运行数据（事件快照） ###
+/data/
+/target/eventing-it/
