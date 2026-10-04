@@ -44,7 +44,7 @@ class ConcurrentDuplicateIngestionTest {
     void concurrentDuplicatesAreAcceptedOnceAndProcessedOnce(@TempDir Path dir) throws Exception {
         String key = "payment-dup-concurrent";
         MutableClock clock = MutableClock.startAt(Instant.parse("2026-09-23T00:00:00Z"));
-        FileEventStore store = new FileEventStore(dir.resolve("events.dat"));
+        FileEventStore store = new FileEventStore(dir.resolve("events.dat"), clock);
         DemoLedgerEventHandler handler = new DemoLedgerEventHandler();
         RetryBackoffPolicy policy =
                 new RetryBackoffPolicy(5, Duration.ofMillis(1), Duration.ofMillis(10), 2.0);
@@ -139,7 +139,7 @@ class ConcurrentDuplicateIngestionTest {
     @Test
     void distinctKeysAreAllAccepted(@TempDir Path dir) {
         MutableClock clock = MutableClock.startAt(Instant.now());
-        FileEventStore store = new FileEventStore(dir.resolve("events2.dat"));
+        FileEventStore store = new FileEventStore(dir.resolve("events2.dat"), clock);
         DemoLedgerEventHandler handler = new DemoLedgerEventHandler();
         RetryBackoffPolicy policy =
                 new RetryBackoffPolicy(5, Duration.ofMillis(1), Duration.ofMillis(10), 2.0);
@@ -159,7 +159,7 @@ class ConcurrentDuplicateIngestionTest {
     @Test
     void invalidAndOverCapacityRequestsAreRejectedNotSilentlyAccepted(@TempDir Path dir) {
         MutableClock clock = MutableClock.startAt(Instant.now());
-        FileEventStore store = new FileEventStore(dir.resolve("events3.dat"));
+        FileEventStore store = new FileEventStore(dir.resolve("events3.dat"), clock);
         DemoLedgerEventHandler handler = new DemoLedgerEventHandler();
         RetryBackoffPolicy policy =
                 new RetryBackoffPolicy(5, Duration.ofMillis(1), Duration.ofMillis(10), 2.0);

@@ -27,8 +27,20 @@ public class EventRecord implements Serializable {
 
     private EventStatus status;
 
-    /** 已执行（含正在执行）的处理尝试次数。 */
+    /** 已执行（含正在执行）的处理尝试总次数：跨重跑轮次累计，永不重置。 */
     private int attempts;
+
+    /** 当前轮次（首轮或某轮重跑）内已执行的尝试次数；每次发起重跑时重置为 0。 */
+    private int roundAttempts;
+
+    /** 已发起的重跑轮数：0 表示仍为首轮处理。 */
+    private int rerunCount;
+
+    /** 最近一次进入终止态的原因；重跑会清空 {@link #terminationReason}，但历史终止原因在此保留。 */
+    private TerminationReason lastTerminationReason;
+
+    /** 最近一次进入终止态的时刻；未终止过为 null。 */
+    private Instant lastTerminatedAt;
 
     private Instant lastAttemptAt;
 
@@ -98,6 +110,38 @@ public class EventRecord implements Serializable {
 
     public void setAttempts(int attempts) {
         this.attempts = attempts;
+    }
+
+    public int getRoundAttempts() {
+        return roundAttempts;
+    }
+
+    public void setRoundAttempts(int roundAttempts) {
+        this.roundAttempts = roundAttempts;
+    }
+
+    public int getRerunCount() {
+        return rerunCount;
+    }
+
+    public void setRerunCount(int rerunCount) {
+        this.rerunCount = rerunCount;
+    }
+
+    public TerminationReason getLastTerminationReason() {
+        return lastTerminationReason;
+    }
+
+    public void setLastTerminationReason(TerminationReason lastTerminationReason) {
+        this.lastTerminationReason = lastTerminationReason;
+    }
+
+    public Instant getLastTerminatedAt() {
+        return lastTerminatedAt;
+    }
+
+    public void setLastTerminatedAt(Instant lastTerminatedAt) {
+        this.lastTerminatedAt = lastTerminatedAt;
     }
 
     public Instant getLastAttemptAt() {

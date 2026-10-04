@@ -77,8 +77,11 @@ public class EventProcessingService {
     /** 必须在持有 store 监视器时调用。 */
     private EventRecord attemptRecord(EventRecord record) {
         Instant now = clock.instant();
+        // attempts 跨重跑轮次累计（总处理次数），roundAttempts 仅统计本轮，用于退避与上限判定。
         int attempt = record.getAttempts() + 1;
+        int roundAttempt = record.getRoundAttempts() + 1;
         record.setAttempts(attempt);
+        record.setRoundAttempts(roundAttempt);
         record.setStatus(EventStatus.PROCESSING);
         record.setLastAttemptAt(now);
         record.setNextAttemptAt(null);
@@ -96,45 +99,48 @@ public class EventProcessingService {
             record.setNextAttemptAt(null);
             record.setUpdatedAt(doneAt);
             store.persist();
-            log.info("幂等键={} 重试次数={} 判定=成功 进入SUCCEEDED 凭证={}",
-                    record.getIdempotencyKey(), attempt - 1, voucher);
+            log.info("幂等键={} 重跑轮数={} 本轮第{}次尝试(累计第{}次) 判定=成功 进入SUCCEEDED 凭证={}",
+                    record.getIdempotencyKey(), record.getRerunCount(), roundAttempt, attempt, voucher);
             return record;
         } catch (EventProcessingException e) {
-            return handleFailure(record, attempt, e.getMessage(), e.isRetryable(), now);
+            return handleFailure(record, attempt, roundAttempt, e.getMessage(), e.isRetryable(), now);
         } catch (RuntimeException e) {
             // 未受控异常按可重试处理，达到上限后同样终止，保证不静默丢失。
-            log.warn("幂等键={} 第{}次尝试 抛出未受控异常，按可重试处理: {}",
-                    record.getIdempotencyKey(), attempt, e.toString());
-            return handleFailure(record, attempt, "未受控异常: " + e, true, now);
+            log.warn("幂等键={} 重跑轮数={} 本轮第{}次尝试 抛出未受控异常，按可重试处理: {}",
+                    record.getIdempotencyKey(), record.getRerunCount(), roundAttempt, e.toString());
+            return handleFailure(record, attempt, roundAttempt, "未受控异常: " + e, true, now);
         }
     }
 
     /** 必须在持有 store 监视器时调用。 */
-    private EventRecord handleFailure(EventRecord record, int attempt,
+    private EventRecord handleFailure(EventRecord record, int attempt, int roundAttempt,
                                       String error, boolean retryable, Instant now) {
         record.setLastError(error);
         record.setLastErrorRetryable(retryable);
 
-        if (backoffPolicy.canRetry(retryable, attempt)) {
-            Instant nextAt = backoffPolicy.nextAttemptAt(clock.instant(), attempt);
+        if (backoffPolicy.canRetry(retryable, roundAttempt)) {
+            Instant nextAt = backoffPolicy.nextAttemptAt(clock.instant(), roundAttempt);
             record.setStatus(EventStatus.QUEUED);
             record.setNextAttemptAt(nextAt);
             record.setUpdatedAt(clock.instant());
             store.persist();
-            log.info("幂等键={} 重试次数={} 判定=可重试失败({}) 退避至{} 进入QUEUED",
-                    record.getIdempotencyKey(), attempt - 1, error, nextAt);
+            log.info("幂等键={} 重跑轮数={} 本轮第{}次尝试(累计第{}次) 判定=可重试失败({}) 退避至{} 进入QUEUED",
+                    record.getIdempotencyKey(), record.getRerunCount(), roundAttempt, attempt, error, nextAt);
         } else {
             TerminationReason reason = retryable
                     ? TerminationReason.RETRY_EXHAUSTED
                     : TerminationReason.NON_RETRYABLE;
+            Instant terminatedAt = clock.instant();
             record.setStatus(EventStatus.TERMINATED);
             record.setTerminationReason(reason);
+            record.setLastTerminationReason(reason);
+            record.setLastTerminatedAt(terminatedAt);
             record.setNextAttemptAt(null);
-            record.setUpdatedAt(clock.instant());
+            record.setUpdatedAt(terminatedAt);
             store.persist();
-            log.warn("幂等键={} 重试次数={} 判定=终止 原因={} 错误={} 上限={}",
-                    record.getIdempotencyKey(), attempt - 1, reason, error,
-                    backoffPolicy.getMaxAttempts());
+            log.warn("幂等键={} 重跑轮数={} 本轮第{}次尝试(累计第{}次) 判定=终止 原因={} 错误={} 本轮上限={}",
+                    record.getIdempotencyKey(), record.getRerunCount(), roundAttempt, attempt,
+                    reason, error, backoffPolicy.getMaxAttempts());
         }
         return record;
     }

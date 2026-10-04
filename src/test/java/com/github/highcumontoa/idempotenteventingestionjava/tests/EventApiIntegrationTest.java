@@ -35,6 +35,7 @@ class EventApiIntegrationTest {
         registry.add("eventing.worker-enabled", () -> "false");
         registry.add("eventing.max-queue-capacity", () -> "1");
         registry.add("eventing.max-attempts", () -> "3");
+        registry.add("eventing.max-reruns", () -> "1");
         registry.add("eventing.retry-base-delay", () -> "10ms");
     }
 
@@ -43,9 +44,15 @@ class EventApiIntegrationTest {
     @Autowired
     private MockMvc mockMvc;
 
+    @Autowired
+    private com.github.highcumontoa.idempotenteventingestionjava.service.EventProcessingService processor;
+
     @Test
     void httpSemanticsForAcceptDuplicateRejectThrottleAndStats() throws Exception {
         String key = "api-key-" + System.nanoTime();
+
+        // 统计基线（同一 Spring 上下文内多个测试方法共享数据文件，按增量断言）
+        long[] baseline = statsSnapshot();
 
         // 首次接受 202
         mockMvc.perform(post("/api/events").contentType(MediaType.APPLICATION_JSON)
@@ -81,12 +88,78 @@ class EventApiIntegrationTest {
         mockMvc.perform(get("/api/events/missing-" + System.nanoTime()))
                 .andExpect(status().isNotFound());
 
-        // 统计：1 条 QUEUED，total=1，口径一致
+        // 统计：新增 1 条 QUEUED，口径一致（按基线增量断言）
         mockMvc.perform(get("/api/stats"))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$.queued").value(1))
-                .andExpect(jsonPath("$.total").value(1))
+                .andExpect(jsonPath("$.queued").value(baseline[0] + 1))
+                .andExpect(jsonPath("$.total").value(baseline[1] + 1))
                 .andExpect(jsonPath("$.consistent").value(true));
-        log.info("[测试] 幂等键={} 判定依据=统计 queued=1 total=1 consistent=true,重复未计入", key);
+        log.info("[测试] 幂等键={} 判定依据=统计 queued=基线+1 total=基线+1 consistent=true,重复未计入", key);
+    }
+
+    /** 读取当前 [queued, total] 作为增量断言基线。 */
+    private long[] statsSnapshot() throws Exception {
+        String json = mockMvc.perform(get("/api/stats"))
+                .andExpect(status().isOk())
+                .andReturn().getResponse().getContentAsString();
+        com.fasterxml.jackson.databind.JsonNode node =
+                new com.fasterxml.jackson.databind.ObjectMapper().readTree(json);
+        return new long[]{node.get("queued").asLong(), node.get("total").asLong()};
+    }
+
+    @Test
+    void rerunEndpointSemantics() throws Exception {
+        String key = "api-rerun-" + System.nanoTime();
+
+        // 同一上下文共享数据文件：先排空其他用例遗留的在途事件，避免占用容量（上限=1）
+        processor.processDueBatch();
+
+        // 不存在的键 -> 404 NOT_FOUND
+        mockMvc.perform(post("/api/events/missing-" + System.nanoTime() + "/rerun"))
+                .andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.rejectionReason").value("NOT_FOUND"));
+        log.info("[测试] 幂等键=<不存在> 判定依据=HTTP 404 NOT_FOUND");
+
+        // 制造终止事件：FATAL 一次处理即 NON_RETRYABLE 终止（worker 关闭，手工驱动）
+        mockMvc.perform(post("/api/events").contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"idempotencyKey\":\"" + key + "\",\"payload\":\"FATAL:脏数据\"}"))
+                .andExpect(status().isAccepted());
+        processor.processDueBatch();
+        mockMvc.perform(get("/api/events/" + key))
+                .andExpect(jsonPath("$.status").value("TERMINATED"))
+                .andExpect(jsonPath("$.terminationReason").value("NON_RETRYABLE"));
+        log.info("[测试] 幂等键={} 处理次数=1 判定依据=不可重试失败终止,具备重跑前提", key);
+
+        // 发起重跑 -> 202 ACCEPTED，重新入队，历史保留
+        mockMvc.perform(post("/api/events/" + key + "/rerun"))
+                .andExpect(status().isAccepted())
+                .andExpect(jsonPath("$.outcome").value("ACCEPTED"))
+                .andExpect(jsonPath("$.record.status").value("QUEUED"))
+                .andExpect(jsonPath("$.record.rerunCount").value(1))
+                .andExpect(jsonPath("$.record.attempts").value(1))
+                .andExpect(jsonPath("$.record.lastTerminationReason").value("NON_RETRYABLE"));
+        log.info("[测试] 幂等键={} 重跑轮数=1 判定依据=HTTP 202 重新入队,上轮终止原因保留", key);
+
+        // 排队中再发重跑 -> 409 NOT_TERMINATED（与轮数到顶可区分）
+        mockMvc.perform(post("/api/events/" + key + "/rerun"))
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.rejectionReason").value("NOT_TERMINATED"));
+        log.info("[测试] 幂等键={} 判定依据=HTTP 409 NOT_TERMINATED 当前状态不允许重跑", key);
+
+        // 重跑轮再次终止（max-reruns=1 已用满）-> 409 RERUN_LIMIT_REACHED
+        processor.processDueBatch();
+        mockMvc.perform(get("/api/events/" + key))
+                .andExpect(jsonPath("$.status").value("TERMINATED"))
+                .andExpect(jsonPath("$.rerunCount").value(1))
+                .andExpect(jsonPath("$.attempts").value(2));
+        mockMvc.perform(post("/api/events/" + key + "/rerun"))
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.rejectionReason").value("RERUN_LIMIT_REACHED"));
+        log.info("[测试] 幂等键={} 重跑轮数=1/1 判定依据=HTTP 409 RERUN_LIMIT_REACHED 轮数到顶明确拒绝", key);
+
+        // 统计口径不受重跑拒绝影响
+        mockMvc.perform(get("/api/stats"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.consistent").value(true));
     }
 }

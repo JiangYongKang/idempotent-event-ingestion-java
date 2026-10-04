@@ -43,7 +43,7 @@ class RetryAndTerminationTest {
     private Harness harness(Path dir) {
         MutableClock clock = MutableClock.startAt(Instant.parse("2026-09-23T00:00:00Z"));
         int maxAttempts = 3;
-        FileEventStore store = new FileEventStore(dir.resolve("events.dat"));
+        FileEventStore store = new FileEventStore(dir.resolve("events.dat"), clock);
         DemoLedgerEventHandler handler = new DemoLedgerEventHandler();
         RetryBackoffPolicy policy =
                 new RetryBackoffPolicy(maxAttempts, Duration.ofMillis(100), Duration.ofSeconds(5), 2.0);

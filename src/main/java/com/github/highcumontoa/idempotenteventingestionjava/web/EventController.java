@@ -5,8 +5,11 @@ import com.github.highcumontoa.idempotenteventingestionjava.model.EventRecord;
 import com.github.highcumontoa.idempotenteventingestionjava.model.EventStats;
 import com.github.highcumontoa.idempotenteventingestionjava.model.IngestionResult;
 import com.github.highcumontoa.idempotenteventingestionjava.model.RejectionReason;
+import com.github.highcumontoa.idempotenteventingestionjava.model.RerunRejectionReason;
+import com.github.highcumontoa.idempotenteventingestionjava.model.RerunResult;
 import com.github.highcumontoa.idempotenteventingestionjava.service.EventIngestionService;
 import com.github.highcumontoa.idempotenteventingestionjava.service.EventQueryService;
+import com.github.highcumontoa.idempotenteventingestionjava.service.EventRerunService;
 import java.time.Instant;
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -23,6 +26,8 @@ import org.springframework.web.bind.annotation.RestController;
  * REST 接口：
  * <ul>
  *   <li>POST /api/events          —— 接入：202 首次接受 / 200 重复 / 400 非法 / 503 限流；</li>
+ *   <li>POST /api/events/{key}/rerun —— 终止事件受控重跑：202 重新入队 /
+ *       404 不存在 / 409 状态不允许或轮数到顶 / 503 容量不足；</li>
  *   <li>GET  /api/events/{key}    —— 查询单个事件状态（200 / 404）；</li>
  *   <li>GET  /api/stats           —— 四类状态统计，互斥且合计为 total。</li>
  * </ul>
@@ -32,10 +37,13 @@ import org.springframework.web.bind.annotation.RestController;
 public class EventController {
 
     private final EventIngestionService ingestionService;
+    private final EventRerunService rerunService;
     private final EventQueryService queryService;
 
-    public EventController(EventIngestionService ingestionService, EventQueryService queryService) {
+    public EventController(EventIngestionService ingestionService, EventRerunService rerunService,
+                           EventQueryService queryService) {
         this.ingestionService = ingestionService;
+        this.rerunService = rerunService;
         this.queryService = queryService;
     }
 
@@ -69,6 +77,33 @@ public class EventController {
         };
     }
 
+    @PostMapping("/events/{key}/rerun")
+    public ResponseEntity<Map<String, Object>> rerun(@PathVariable String key) {
+        RerunResult result = rerunService.rerun(key);
+
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("outcome", result.outcome());
+        body.put("message", result.message());
+
+        return switch (result.outcome()) {
+            case ACCEPTED -> {
+                body.put("record", view(result.record()));
+                yield ResponseEntity.status(HttpStatus.ACCEPTED).body(body);
+            }
+            case REJECTED -> {
+                RerunRejectionReason reason = result.rejectionReason();
+                body.put("rejectionReason", reason);
+                HttpStatus status = switch (reason) {
+                    case NOT_FOUND -> HttpStatus.NOT_FOUND;
+                    case QUEUE_FULL -> HttpStatus.SERVICE_UNAVAILABLE;
+                    // 状态不允许与轮数到顶都属“与当前资源状态冲突”，靠 rejectionReason 区分。
+                    case NOT_TERMINATED, RERUN_LIMIT_REACHED -> HttpStatus.CONFLICT;
+                };
+                yield ResponseEntity.status(status).body(body);
+            }
+        };
+    }
+
     @GetMapping("/events/{key}")
     public ResponseEntity<Map<String, Object>> getOne(@PathVariable String key) {
         EventRecord record = queryService.get(key);
@@ -96,9 +131,13 @@ public class EventController {
         m.put("idempotencyKey", r.getIdempotencyKey());
         m.put("status", r.getStatus());
         m.put("attempts", r.getAttempts());
+        m.put("roundAttempts", r.getRoundAttempts());
+        m.put("rerunCount", r.getRerunCount());
         m.put("lastError", r.getLastError());
         m.put("lastErrorRetryable", r.isLastErrorRetryable());
         m.put("terminationReason", r.getTerminationReason());
+        m.put("lastTerminationReason", r.getLastTerminationReason());
+        m.put("lastTerminatedAt", r.getLastTerminatedAt());
         m.put("result", r.getResult());
         m.put("createdAt", r.getCreatedAt());
         m.put("updatedAt", r.getUpdatedAt());

@@ -9,6 +9,7 @@ import java.io.Serializable;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
+import java.time.Clock;
 import java.time.Instant;
 import java.util.Collection;
 import java.util.HashMap;
@@ -44,10 +45,12 @@ public class FileEventStore implements EventStore {
     }
 
     private final Path dataFile;
+    private final Clock clock;
     private final Map<String, EventRecord> records = new HashMap<>();
 
-    public FileEventStore(Path dataFile) {
+    public FileEventStore(Path dataFile, Clock clock) {
         this.dataFile = dataFile;
+        this.clock = clock;
         load();
     }
 
@@ -61,7 +64,9 @@ public class FileEventStore implements EventStore {
             if (snapshot.records != null) {
                 records.putAll(snapshot.records);
             }
-            Instant now = Instant.now();
+            // 必须使用与处理服务一致的时钟：回退后的 nextAttemptAt 才能被“到期判断”正确捞起，
+            // 否则重启后事件会一直停在 QUEUED 不再前进。
+            Instant now = clock.instant();
             long reset = 0;
             for (EventRecord r : records.values()) {
                 if (r.getStatus() == com.github.highcumontoa.idempotenteventingestionjava.model.EventStatus.PROCESSING) {

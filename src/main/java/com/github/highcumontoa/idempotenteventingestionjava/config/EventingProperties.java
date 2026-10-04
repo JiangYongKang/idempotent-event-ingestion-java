@@ -27,6 +27,9 @@ public class EventingProperties {
     /** 排队（QUEUED）容量上限；超过则以 503 限流拒绝，绝不阻塞调用方。 */
     private int maxQueueCapacity = 1000;
 
+    /** 同一事件允许的最大重跑轮数；到顶后再发起重跑将以 RERUN_LIMIT_REACHED 明确拒绝。 */
+    private int maxReruns = 3;
+
     /** 幂等键最大长度。 */
     private int maxKeyLength = 128;
 
@@ -85,6 +88,14 @@ public class EventingProperties {
 
     public void setMaxQueueCapacity(int maxQueueCapacity) {
         this.maxQueueCapacity = maxQueueCapacity;
+    }
+
+    public int getMaxReruns() {
+        return maxReruns;
+    }
+
+    public void setMaxReruns(int maxReruns) {
+        this.maxReruns = maxReruns;
     }
 
     public int getMaxKeyLength() {
