@@ -3,6 +3,8 @@ package com.github.highcumontoa.idempotenteventingestionjava.model;
 import java.io.Serial;
 import java.io.Serializable;
 import java.time.Instant;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Objects;
 
 /**
@@ -27,8 +29,20 @@ public class EventRecord implements Serializable {
 
     private EventStatus status;
 
-    /** 已执行（含正在执行）的处理尝试次数。 */
+    /** 已执行（含正在执行）的处理尝试次数：跨全部轮次累计，重跑后不清零。 */
     private int attempts;
+
+    /** 当前轮次内已执行的尝试次数：重试上限/退避按此计数，重跑时清零重新计。 */
+    private int attemptsInRound;
+
+    /** 已发起的重跑轮数：0 表示仍在最初一轮，N 表示当前处于第 N 次重跑。 */
+    private int rerunCount;
+
+    /**
+     * 已结束轮次的历史快照（重跑发起时归档上一轮终局）。
+     * 反序列化旧版本数据文件时该字段可能为 null，读取必须走 {@link #getRerunHistory()}。
+     */
+    private List<RerunRecord> rerunHistory;
 
     private Instant lastAttemptAt;
 
@@ -62,6 +76,34 @@ public class EventRecord implements Serializable {
             this.nextAttemptAt = now;
             this.updatedAt = now;
         }
+    }
+
+    /**
+     * 发起一轮重跑（仅限 TERMINATED 态调用，调用方必须在存储监视器内完成状态判断）：
+     * 把当前轮次的终局（终止原因/本轮尝试次数/最后错误）归档进 {@link #rerunHistory}，
+     * 然后清零本轮计数、清除终止痕迹，重新进入 QUEUED 等待完整再跑一轮。
+     * 累计尝试次数 {@link #attempts} 与历史归档不清除，保证重跑痕迹可解释。
+     */
+    public void beginRerun(Instant now) {
+        if (this.status != EventStatus.TERMINATED) {
+            throw new IllegalStateException("仅终止态事件可发起重跑: " + idempotencyKey
+                    + " 当前状态=" + this.status);
+        }
+        if (this.rerunHistory == null) {
+            this.rerunHistory = new ArrayList<>();
+        }
+        this.rerunHistory.add(new RerunRecord(this.rerunCount, this.terminationReason,
+                this.attemptsInRound, this.lastError, this.updatedAt));
+        this.rerunCount++;
+        this.attemptsInRound = 0;
+        this.status = EventStatus.QUEUED;
+        this.terminationReason = null;
+        this.lastError = null;
+        this.lastErrorRetryable = false;
+        this.result = null;
+        this.lastAttemptAt = null;
+        this.nextAttemptAt = now;
+        this.updatedAt = now;
     }
 
     public String getIdempotencyKey() {
@@ -98,6 +140,23 @@ public class EventRecord implements Serializable {
 
     public void setAttempts(int attempts) {
         this.attempts = attempts;
+    }
+
+    public int getAttemptsInRound() {
+        return attemptsInRound;
+    }
+
+    public void setAttemptsInRound(int attemptsInRound) {
+        this.attemptsInRound = attemptsInRound;
+    }
+
+    public int getRerunCount() {
+        return rerunCount;
+    }
+
+    /** 已结束轮次的历史归档（按轮次升序），永不返回 null。 */
+    public List<RerunRecord> getRerunHistory() {
+        return rerunHistory == null ? List.of() : List.copyOf(rerunHistory);
     }
 
     public Instant getLastAttemptAt() {

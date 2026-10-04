@@ -77,8 +77,10 @@ public class EventProcessingService {
     /** 必须在持有 store 监视器时调用。 */
     private EventRecord attemptRecord(EventRecord record) {
         Instant now = clock.instant();
-        int attempt = record.getAttempts() + 1;
-        record.setAttempts(attempt);
+        // 重试上限/退避按“本轮”计数（重跑后重新计），总次数跨轮累计用于可解释性。
+        int attempt = record.getAttemptsInRound() + 1;
+        record.setAttemptsInRound(attempt);
+        record.setAttempts(record.getAttempts() + 1);
         record.setStatus(EventStatus.PROCESSING);
         record.setLastAttemptAt(now);
         record.setNextAttemptAt(null);
@@ -96,15 +98,16 @@ public class EventProcessingService {
             record.setNextAttemptAt(null);
             record.setUpdatedAt(doneAt);
             store.persist();
-            log.info("幂等键={} 重试次数={} 判定=成功 进入SUCCEEDED 凭证={}",
-                    record.getIdempotencyKey(), attempt - 1, voucher);
+            log.info("幂等键={} 轮次={} 本轮第{}次尝试(累计第{}次) 判定=成功 进入SUCCEEDED 凭证={}",
+                    record.getIdempotencyKey(), record.getRerunCount(), attempt,
+                    record.getAttempts(), voucher);
             return record;
         } catch (EventProcessingException e) {
             return handleFailure(record, attempt, e.getMessage(), e.isRetryable(), now);
         } catch (RuntimeException e) {
             // 未受控异常按可重试处理，达到上限后同样终止，保证不静默丢失。
-            log.warn("幂等键={} 第{}次尝试 抛出未受控异常，按可重试处理: {}",
-                    record.getIdempotencyKey(), attempt, e.toString());
+            log.warn("幂等键={} 轮次={} 本轮第{}次尝试 抛出未受控异常，按可重试处理: {}",
+                    record.getIdempotencyKey(), record.getRerunCount(), attempt, e.toString());
             return handleFailure(record, attempt, "未受控异常: " + e, true, now);
         }
     }
@@ -121,8 +124,8 @@ public class EventProcessingService {
             record.setNextAttemptAt(nextAt);
             record.setUpdatedAt(clock.instant());
             store.persist();
-            log.info("幂等键={} 重试次数={} 判定=可重试失败({}) 退避至{} 进入QUEUED",
-                    record.getIdempotencyKey(), attempt - 1, error, nextAt);
+            log.info("幂等键={} 轮次={} 本轮第{}次尝试 判定=可重试失败({}) 退避至{} 进入QUEUED",
+                    record.getIdempotencyKey(), record.getRerunCount(), attempt, error, nextAt);
         } else {
             TerminationReason reason = retryable
                     ? TerminationReason.RETRY_EXHAUSTED
@@ -132,9 +135,9 @@ public class EventProcessingService {
             record.setNextAttemptAt(null);
             record.setUpdatedAt(clock.instant());
             store.persist();
-            log.warn("幂等键={} 重试次数={} 判定=终止 原因={} 错误={} 上限={}",
-                    record.getIdempotencyKey(), attempt - 1, reason, error,
-                    backoffPolicy.getMaxAttempts());
+            log.warn("幂等键={} 轮次={} 本轮第{}次尝试 判定=终止 原因={} 错误={} 本轮上限={} 已重跑轮数={}",
+                    record.getIdempotencyKey(), record.getRerunCount(), attempt, reason, error,
+                    backoffPolicy.getMaxAttempts(), record.getRerunCount());
         }
         return record;
     }

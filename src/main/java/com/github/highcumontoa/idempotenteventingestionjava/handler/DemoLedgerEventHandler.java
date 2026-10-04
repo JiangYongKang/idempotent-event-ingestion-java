@@ -2,6 +2,7 @@ package com.github.highcumontoa.idempotenteventingestionjava.handler;
 
 import com.github.highcumontoa.idempotenteventingestionjava.model.EventRecord;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
 import org.slf4j.Logger;
@@ -14,7 +15,10 @@ import org.slf4j.LoggerFactory;
  * <ul>
  *   <li>{@code RETRYABLE:<reason>} —— 每次都抛“可重试”异常，用于演示重试直至上限终止；</li>
  *   <li>{@code FATAL:<reason>}     —— 抛“不可重试”异常，用于演示立即终止；</li>
- *   <li>{@code FLAKY:N}            —— 前 N 次尝试可重试失败，第 N+1 次起成功；</li>
+ *   <li>{@code FLAKY:N}            —— 每轮的前 N 次尝试可重试失败，第 N+1 次起成功
+ *       （按本轮尝试次数计，重跑的新一轮重新计数）；</li>
+ *   <li>{@code FIXABLE:<reason>}   —— 可重试失败，直到调用 {@link #markFixed(String)}
+ *       （模拟“下游恢复/数据改对了”），用于演示终止后重跑成功；</li>
  *   <li>其他载荷                    —— 正常成功。</li>
  * </ul>
  *
@@ -29,31 +33,45 @@ public class DemoLedgerEventHandler implements EventHandler {
     private final Map<String, String> ledger = new ConcurrentHashMap<>();
     private final AtomicLong sequence = new AtomicLong();
 
+    /** FIXABLE 载荷中被“修复”的幂等键：修复后再次处理即成功。 */
+    private final Set<String> fixedKeys = ConcurrentHashMap.newKeySet();
+
     /** 实际发生的记账次数（不含被幂等拦截的重复调用）。 */
     private final AtomicLong appliedEffectCount = new AtomicLong();
 
     @Override
     public String handle(EventRecord record) throws EventProcessingException {
         String key = record.getIdempotencyKey();
-        int attempt = record.getAttempts();
+        int attempt = record.getAttemptsInRound();
+        int round = record.getRerunCount();
         String payload = record.getPayload() == null ? "" : record.getPayload();
 
         // 崩溃重放 / 重复调用的副作用防线：已记过账则直接返回原凭证。
         String existing = ledger.get(key);
         if (existing != null) {
-            log.info("幂等键={} 第{}次尝试 判定=副作用已存在,直接返回既有凭证,不重复记账", key, attempt);
+            log.info("幂等键={} 轮次={} 本轮第{}次尝试 判定=副作用已存在,直接返回既有凭证,不重复记账",
+                    key, round, attempt);
             return existing;
         }
 
         if (payload.startsWith("RETRYABLE:")) {
-            log.info("幂等键={} 第{}次尝试 判定=可重试失败({})", key, attempt,
+            log.info("幂等键={} 轮次={} 本轮第{}次尝试 判定=可重试失败({})", key, round, attempt,
                     payload.substring("RETRYABLE:".length()));
             throw new EventProcessingException("可重试失败: " + payload.substring("RETRYABLE:".length()), true);
         }
         if (payload.startsWith("FATAL:")) {
-            log.info("幂等键={} 第{}次尝试 判定=不可重试失败({})", key, attempt,
+            log.info("幂等键={} 轮次={} 本轮第{}次尝试 判定=不可重试失败({})", key, round, attempt,
                     payload.substring("FATAL:".length()));
             throw new EventProcessingException("不可重试失败: " + payload.substring("FATAL:".length()), false);
+        }
+        if (payload.startsWith("FIXABLE:")) {
+            if (!fixedKeys.contains(key)) {
+                log.info("幂等键={} 轮次={} 本轮第{}次尝试 判定=可重试失败(故障未修复: {})", key, round, attempt,
+                        payload.substring("FIXABLE:".length()));
+                throw new EventProcessingException(
+                        "可重试失败(故障未修复): " + payload.substring("FIXABLE:".length()), true);
+            }
+            log.info("幂等键={} 轮次={} 本轮第{}次尝试 判定=故障已修复,继续正常处理", key, round, attempt);
         }
         if (payload.startsWith("FLAKY:")) {
             int failTimes = 0;
@@ -63,7 +81,8 @@ public class DemoLedgerEventHandler implements EventHandler {
                 throw new EventProcessingException("FLAKY 载荷格式非法: " + payload, false);
             }
             if (attempt <= failTimes) {
-                log.info("幂等键={} 第{}次尝试 判定=可重试失败(计划前{}次失败)", key, attempt, failTimes);
+                log.info("幂等键={} 轮次={} 本轮第{}次尝试 判定=可重试失败(计划本轮前{}次失败)",
+                        key, round, attempt, failTimes);
                 throw new EventProcessingException(
                         "临时性失败，计划在第 " + (failTimes + 1) + " 次恢复", true);
             }
@@ -73,13 +92,20 @@ public class DemoLedgerEventHandler implements EventHandler {
         String voucher = "LEDGER-" + sequence.incrementAndGet();
         String winner = ledger.putIfAbsent(key, voucher);
         if (winner != null) {
-            log.info("幂等键={} 第{}次尝试 判定=并发副作用竞争失败,复用既有凭证,不重复记账", key, attempt);
+            log.info("幂等键={} 轮次={} 本轮第{}次尝试 判定=并发副作用竞争失败,复用既有凭证,不重复记账",
+                    key, round, attempt);
             return winner;
         }
         appliedEffectCount.incrementAndGet();
-        log.info("幂等键={} 第{}次尝试 判定=成功记账 凭证={} 累计记账={}", key, attempt, voucher,
-                appliedEffectCount.get());
+        log.info("幂等键={} 轮次={} 本轮第{}次尝试 判定=成功记账 凭证={} 累计记账={}",
+                key, round, attempt, voucher, appliedEffectCount.get());
         return voucher;
+    }
+
+    /** 模拟“下游恢复/数据改对了”：FIXABLE 载荷的事件此后处理即成功。 */
+    public void markFixed(String idempotencyKey) {
+        fixedKeys.add(idempotencyKey);
+        log.info("幂等键={} 判定=故障已修复(markFixed),后续处理将成功", idempotencyKey);
     }
 
     public long getAppliedEffectCount() {

@@ -9,6 +9,7 @@ import java.io.Serializable;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
+import java.time.Clock;
 import java.time.Instant;
 import java.util.Collection;
 import java.util.HashMap;
@@ -44,10 +45,18 @@ public class FileEventStore implements EventStore {
     }
 
     private final Path dataFile;
+    private final Clock clock;
     private final Map<String, EventRecord> records = new HashMap<>();
 
-    public FileEventStore(Path dataFile) {
+    /**
+     * @param dataFile 数据文件路径
+     * @param clock    与处理/调度使用的同一时钟：崩溃恢复时回退 PROCESSING 的
+     *                 {@code nextAttemptAt} 必须用它计算，否则恢复出的事件可能
+     *                 “到点判断”永远落在未来而一直停在原地。
+     */
+    public FileEventStore(Path dataFile, Clock clock) {
         this.dataFile = dataFile;
+        this.clock = clock;
         load();
     }
 
@@ -61,7 +70,7 @@ public class FileEventStore implements EventStore {
             if (snapshot.records != null) {
                 records.putAll(snapshot.records);
             }
-            Instant now = Instant.now();
+            Instant now = clock.instant();
             long reset = 0;
             for (EventRecord r : records.values()) {
                 if (r.getStatus() == com.github.highcumontoa.idempotenteventingestionjava.model.EventStatus.PROCESSING) {

@@ -40,7 +40,7 @@ class RestartRecoveryTest {
     }
 
     private Ctx boot(Path file, MutableClock clock) {
-        FileEventStore store = new FileEventStore(file);
+        FileEventStore store = new FileEventStore(file, clock);
         DemoLedgerEventHandler handler = new DemoLedgerEventHandler();
         RetryBackoffPolicy policy =
                 new RetryBackoffPolicy(3, Duration.ofMillis(100), Duration.ofSeconds(5), 2.0);
@@ -97,6 +97,7 @@ class RestartRecoveryTest {
         synchronized (first.store) {
             queued.setStatus(EventStatus.PROCESSING);
             queued.setAttempts(1);
+            queued.setAttemptsInRound(1);
             queued.setNextAttemptAt(null);
             first.store.persist();
         }

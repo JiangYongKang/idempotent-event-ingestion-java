@@ -38,8 +38,8 @@ public class EventingConfig {
     }
 
     @Bean
-    public EventStore eventStore(EventingProperties props) {
-        return new FileEventStore(Path.of(props.getDataFile()));
+    public EventStore eventStore(EventingProperties props, Clock clock) {
+        return new FileEventStore(Path.of(props.getDataFile()), clock);
     }
 
     @Bean

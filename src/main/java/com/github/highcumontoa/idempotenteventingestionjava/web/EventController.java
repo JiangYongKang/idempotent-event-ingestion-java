@@ -5,10 +5,17 @@ import com.github.highcumontoa.idempotenteventingestionjava.model.EventRecord;
 import com.github.highcumontoa.idempotenteventingestionjava.model.EventStats;
 import com.github.highcumontoa.idempotenteventingestionjava.model.IngestionResult;
 import com.github.highcumontoa.idempotenteventingestionjava.model.RejectionReason;
+import com.github.highcumontoa.idempotenteventingestionjava.model.RerunOutcome;
+import com.github.highcumontoa.idempotenteventingestionjava.model.RerunRejectionReason;
+import com.github.highcumontoa.idempotenteventingestionjava.model.RerunRecord;
+import com.github.highcumontoa.idempotenteventingestionjava.model.RerunResult;
 import com.github.highcumontoa.idempotenteventingestionjava.service.EventIngestionService;
 import com.github.highcumontoa.idempotenteventingestionjava.service.EventQueryService;
+import com.github.highcumontoa.idempotenteventingestionjava.service.EventRerunService;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
@@ -23,6 +30,8 @@ import org.springframework.web.bind.annotation.RestController;
  * REST 接口：
  * <ul>
  *   <li>POST /api/events          —— 接入：202 首次接受 / 200 重复 / 400 非法 / 503 限流；</li>
+ *   <li>POST /api/events/{key}/rerun —— 终止事件受控重跑：202 已重新入队 /
+ *     404 键不存在 / 409 状态不允许或轮数到顶 / 503 容量不足；</li>
  *   <li>GET  /api/events/{key}    —— 查询单个事件状态（200 / 404）；</li>
  *   <li>GET  /api/stats           —— 四类状态统计，互斥且合计为 total。</li>
  * </ul>
@@ -33,10 +42,13 @@ public class EventController {
 
     private final EventIngestionService ingestionService;
     private final EventQueryService queryService;
+    private final EventRerunService rerunService;
 
-    public EventController(EventIngestionService ingestionService, EventQueryService queryService) {
+    public EventController(EventIngestionService ingestionService, EventQueryService queryService,
+                           EventRerunService rerunService) {
         this.ingestionService = ingestionService;
         this.queryService = queryService;
+        this.rerunService = rerunService;
     }
 
     @PostMapping("/events")
@@ -78,6 +90,28 @@ public class EventController {
         return ResponseEntity.ok(view(record));
     }
 
+    @PostMapping("/events/{key}/rerun")
+    public ResponseEntity<Map<String, Object>> rerun(@PathVariable String key) {
+        RerunResult result = rerunService.rerun(key);
+
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("outcome", result.outcome());
+        body.put("message", result.message());
+
+        if (result.outcome() == RerunOutcome.ACCEPTED) {
+            body.put("record", view(result.record()));
+            return ResponseEntity.status(HttpStatus.ACCEPTED).body(body);
+        }
+        RerunRejectionReason reason = result.rejectionReason();
+        body.put("rejectionReason", reason);
+        HttpStatus status = switch (reason) {
+            case NOT_FOUND -> HttpStatus.NOT_FOUND;
+            case QUEUE_FULL -> HttpStatus.SERVICE_UNAVAILABLE;
+            case NOT_TERMINATED, RERUN_LIMIT_REACHED -> HttpStatus.CONFLICT;
+        };
+        return ResponseEntity.status(status).body(body);
+    }
+
     @GetMapping("/stats")
     public Map<String, Object> stats() {
         EventStats s = queryService.stats();
@@ -96,15 +130,32 @@ public class EventController {
         m.put("idempotencyKey", r.getIdempotencyKey());
         m.put("status", r.getStatus());
         m.put("attempts", r.getAttempts());
+        m.put("attemptsInRound", r.getAttemptsInRound());
+        m.put("rerunCount", r.getRerunCount());
         m.put("lastError", r.getLastError());
         m.put("lastErrorRetryable", r.isLastErrorRetryable());
         m.put("terminationReason", r.getTerminationReason());
         m.put("result", r.getResult());
+        m.put("rerunHistory", rerunHistoryView(r));
         m.put("createdAt", r.getCreatedAt());
         m.put("updatedAt", r.getUpdatedAt());
         m.put("lastAttemptAt", r.getLastAttemptAt());
         m.put("nextAttemptAt", r.getNextAttemptAt() == null ? null : r.getNextAttemptAt());
         m.put("serverTime", Instant.now());
         return m;
+    }
+
+    private List<Map<String, Object>> rerunHistoryView(EventRecord r) {
+        List<Map<String, Object>> history = new ArrayList<>();
+        for (RerunRecord h : r.getRerunHistory()) {
+            Map<String, Object> entry = new LinkedHashMap<>();
+            entry.put("round", h.round());
+            entry.put("terminationReason", h.terminationReason());
+            entry.put("attempts", h.attempts());
+            entry.put("lastError", h.lastError());
+            entry.put("terminatedAt", h.terminatedAt());
+            history.add(entry);
+        }
+        return history;
     }
 }
