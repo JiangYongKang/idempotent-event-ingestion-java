@@ -4,6 +4,7 @@ import com.github.highcumontoa.idempotenteventingestionjava.handler.EventHandler
 import com.github.highcumontoa.idempotenteventingestionjava.handler.EventProcessingException;
 import com.github.highcumontoa.idempotenteventingestionjava.model.EventRecord;
 import com.github.highcumontoa.idempotenteventingestionjava.model.EventStatus;
+import com.github.highcumontoa.idempotenteventingestionjava.model.RoundHistory;
 import com.github.highcumontoa.idempotenteventingestionjava.model.TerminationReason;
 import com.github.highcumontoa.idempotenteventingestionjava.store.EventStore;
 import java.time.Clock;
@@ -91,6 +92,10 @@ public class EventProcessingService {
         try {
             String voucher = handler.handle(record);
             Instant doneAt = clock.instant();
+            // 成功清空前先截取本轮最后一次失败信息（如 FLAKY 前几次失败后恢复），
+            // 让“本轮失败过几次、最后一次报什么”在逐轮历史里仍可回看。
+            String roundLastError = record.getLastError();
+            boolean roundLastErrorRetryable = record.isLastErrorRetryable();
             record.setStatus(EventStatus.SUCCEEDED);
             record.setResult(voucher);
             record.setLastError(null);
@@ -98,9 +103,14 @@ public class EventProcessingService {
             record.setTerminationReason(null);
             record.setNextAttemptAt(null);
             record.setUpdatedAt(doneAt);
+            // 本轮到达结局：追加一条不可变历史后再落盘；已结束的轮次不会被重复追加。
+            record.appendRoundHistory(new RoundHistory(record.getRerunCount(), roundAttempt,
+                    EventStatus.SUCCEEDED, null, roundLastError, roundLastErrorRetryable,
+                    record.getRoundStartedAt(), doneAt));
             store.persist();
-            log.info("幂等键={} 重跑轮数={} 本轮第{}次尝试(累计第{}次) 判定=成功 进入SUCCEEDED 凭证={}",
-                    record.getIdempotencyKey(), record.getRerunCount(), roundAttempt, attempt, voucher);
+            log.info("幂等键={} 重跑轮数={} 本轮第{}次尝试(累计第{}次) 判定=成功 进入SUCCEEDED 凭证={} 已归档轮次={}",
+                    record.getIdempotencyKey(), record.getRerunCount(), roundAttempt, attempt, voucher,
+                    record.getRoundHistory().size());
             return record;
         } catch (EventProcessingException e) {
             return handleFailure(record, attempt, roundAttempt, e.getMessage(), e.isRetryable(), now);
@@ -137,10 +147,15 @@ public class EventProcessingService {
             record.setLastTerminatedAt(terminatedAt);
             record.setNextAttemptAt(null);
             record.setUpdatedAt(terminatedAt);
+            // 本轮终止：把该轮的终止原因、处理次数、失败信息作为独立条目归档，
+            // 后续重跑只新增条目，不会冲掉这一轮。
+            record.appendRoundHistory(new RoundHistory(record.getRerunCount(), roundAttempt,
+                    EventStatus.TERMINATED, reason, error, retryable,
+                    record.getRoundStartedAt(), terminatedAt));
             store.persist();
-            log.warn("幂等键={} 重跑轮数={} 本轮第{}次尝试(累计第{}次) 判定=终止 原因={} 错误={} 本轮上限={}",
+            log.warn("幂等键={} 重跑轮数={} 本轮第{}次尝试(累计第{}次) 判定=终止 原因={} 错误={} 本轮上限={} 已归档轮次={}",
                     record.getIdempotencyKey(), record.getRerunCount(), roundAttempt, attempt,
-                    reason, error, backoffPolicy.getMaxAttempts());
+                    reason, error, backoffPolicy.getMaxAttempts(), record.getRoundHistory().size());
         }
         return record;
     }

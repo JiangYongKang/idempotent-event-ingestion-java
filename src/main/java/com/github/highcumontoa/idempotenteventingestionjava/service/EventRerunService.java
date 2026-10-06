@@ -88,15 +88,22 @@ public class EventRerunService {
             record.setLastTerminationReason(record.getTerminationReason());
             record.setLastTerminatedAt(now);
             record.setTerminationReason(null);
+            // 新一轮从“零失败”开始：清空记录级最近失败信息，避免新一轮成功条目串入上一轮错误；
+            // 上一轮失败文本已完整归档进逐轮历史，不会因此丢失。
+            record.setLastError(null);
+            record.setLastErrorRetryable(false);
             record.setRerunCount(record.getRerunCount() + 1);
             record.setRoundAttempts(0);
+            // 新一轮从零开始；逐轮历史只在每轮结局时追加，这里不清空、不改写，杜绝“压成一条”。
+            record.setRoundStartedAt(now);
             record.setStatus(EventStatus.QUEUED);
             record.setNextAttemptAt(now);
             record.setUpdatedAt(now);
             store.persist();
-            log.info("接受重跑 幂等键={} 重跑轮数={}/{} 累计尝试={} 上轮终止原因={} 判定=重新入队QUEUED",
+            log.info("接受重跑 幂等键={} 重跑轮数={}/{} 累计尝试={} 上轮终止原因={} 已归档轮次={} 判定=重新入队QUEUED",
                     idempotencyKey, record.getRerunCount(), properties.getMaxReruns(),
-                    record.getAttempts(), record.getLastTerminationReason());
+                    record.getAttempts(), record.getLastTerminationReason(),
+                    record.getRoundHistory().size());
             return RerunResult.accepted(record);
         }
     }

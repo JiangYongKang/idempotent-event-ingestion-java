@@ -3,15 +3,19 @@ package com.github.highcumontoa.idempotenteventingestionjava.web;
 import com.github.highcumontoa.idempotenteventingestionjava.dto.EventRequest;
 import com.github.highcumontoa.idempotenteventingestionjava.model.EventRecord;
 import com.github.highcumontoa.idempotenteventingestionjava.model.EventStats;
+import com.github.highcumontoa.idempotenteventingestionjava.model.EventStatus;
 import com.github.highcumontoa.idempotenteventingestionjava.model.IngestionResult;
 import com.github.highcumontoa.idempotenteventingestionjava.model.RejectionReason;
 import com.github.highcumontoa.idempotenteventingestionjava.model.RerunRejectionReason;
 import com.github.highcumontoa.idempotenteventingestionjava.model.RerunResult;
+import com.github.highcumontoa.idempotenteventingestionjava.model.RoundHistory;
 import com.github.highcumontoa.idempotenteventingestionjava.service.EventIngestionService;
 import com.github.highcumontoa.idempotenteventingestionjava.service.EventQueryService;
 import com.github.highcumontoa.idempotenteventingestionjava.service.EventRerunService;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
@@ -133,11 +137,13 @@ public class EventController {
         m.put("attempts", r.getAttempts());
         m.put("roundAttempts", r.getRoundAttempts());
         m.put("rerunCount", r.getRerunCount());
+        m.put("roundStartedAt", r.getRoundStartedAt());
         m.put("lastError", r.getLastError());
         m.put("lastErrorRetryable", r.isLastErrorRetryable());
         m.put("terminationReason", r.getTerminationReason());
         m.put("lastTerminationReason", r.getLastTerminationReason());
         m.put("lastTerminatedAt", r.getLastTerminatedAt());
+        m.put("roundHistory", roundHistoryView(r));
         m.put("result", r.getResult());
         m.put("createdAt", r.getCreatedAt());
         m.put("updatedAt", r.getUpdatedAt());
@@ -145,5 +151,23 @@ public class EventController {
         m.put("nextAttemptAt", r.getNextAttemptAt() == null ? null : r.getNextAttemptAt());
         m.put("serverTime", Instant.now());
         return m;
+    }
+
+    /** 逐轮历史视图：每一轮的轮次、处理次数、结局、终止原因与失败信息彼此独立、按轮次升序。 */
+    private List<Map<String, Object>> roundHistoryView(EventRecord r) {
+        List<Map<String, Object>> rounds = new ArrayList<>();
+        for (RoundHistory h : r.getRoundHistory()) {
+            Map<String, Object> m = new LinkedHashMap<>();
+            m.put("round", h.getRound());
+            m.put("attempts", h.getAttempts());
+            m.put("outcome", h.getOutcome());
+            m.put("terminationReason", h.getTerminationReason());
+            m.put("lastError", h.getLastError());
+            m.put("lastErrorRetryable", h.isLastErrorRetryable());
+            m.put("startedAt", h.getStartedAt());
+            m.put("finishedAt", h.getFinishedAt());
+            rounds.add(m);
+        }
+        return rounds;
     }
 }

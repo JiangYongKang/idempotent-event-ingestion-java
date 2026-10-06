@@ -1,8 +1,12 @@
 package com.github.highcumontoa.idempotenteventingestionjava.model;
 
+import java.io.IOException;
+import java.io.ObjectInputStream;
 import java.io.Serial;
 import java.io.Serializable;
 import java.time.Instant;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Objects;
 
 /**
@@ -36,6 +40,15 @@ public class EventRecord implements Serializable {
     /** 已发起的重跑轮数：0 表示仍为首轮处理。 */
     private int rerunCount;
 
+    /** 当前轮次开始时刻（首轮为接入时间，每发起一次重跑刷新为重跑入队时间）。 */
+    private Instant roundStartedAt;
+
+    /**
+     * 已跑完各轮的历史条目（按轮次升序，round=0 为首轮）。条目只追加、不改写、不删除，
+     * 因此多轮重跑后每一轮的终止原因、处理次数、失败信息都独立可查，互不覆盖、互不串轮。
+     */
+    private List<RoundHistory> roundHistory = new ArrayList<>();
+
     /** 最近一次进入终止态的原因；重跑会清空 {@link #terminationReason}，但历史终止原因在此保留。 */
     private TerminationReason lastTerminationReason;
 
@@ -64,7 +77,40 @@ public class EventRecord implements Serializable {
         this.payload = payload;
         this.createdAt = now;
         this.updatedAt = now;
+        this.roundStartedAt = now;
         this.status = EventStatus.QUEUED;
+    }
+
+    /**
+     * 兼容旧版本数据文件：旧记录没有逐轮历史 / 本轮开始时间字段，反序列化后补默认值，
+     * 保证升级后重启不报错，后续新跑完的轮次照常追加历史。
+     */
+    @Serial
+    private void readObject(ObjectInputStream in) throws IOException, ClassNotFoundException {
+        in.defaultReadObject();
+        if (roundHistory == null) {
+            roundHistory = new ArrayList<>();
+        }
+        if (roundStartedAt == null) {
+            roundStartedAt = createdAt;
+        }
+    }
+
+    /**
+     * 追加一条“本轮结局”历史。只在某轮成功或终止时于存储监视器内调用一次；
+     * 已追加的条目永不再被修改。列表自身锁保证与并发读取快照互不干扰。
+     */
+    public void appendRoundHistory(RoundHistory entry) {
+        synchronized (roundHistory) {
+            roundHistory.add(Objects.requireNonNull(entry, "entry"));
+        }
+    }
+
+    /** 逐轮历史的快照副本（按轮次升序），调用方可在锁外安全遍历。 */
+    public List<RoundHistory> getRoundHistory() {
+        synchronized (roundHistory) {
+            return new ArrayList<>(roundHistory);
+        }
     }
 
     /** 服务重启后调用：把崩溃前停留在 PROCESSING 的事件安全回退为 QUEUED，等待重新处理。 */
@@ -126,6 +172,14 @@ public class EventRecord implements Serializable {
 
     public void setRerunCount(int rerunCount) {
         this.rerunCount = rerunCount;
+    }
+
+    public Instant getRoundStartedAt() {
+        return roundStartedAt;
+    }
+
+    public void setRoundStartedAt(Instant roundStartedAt) {
+        this.roundStartedAt = roundStartedAt;
     }
 
     public TerminationReason getLastTerminationReason() {

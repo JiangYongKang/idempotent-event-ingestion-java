@@ -137,8 +137,14 @@ class EventApiIntegrationTest {
                 .andExpect(jsonPath("$.record.status").value("QUEUED"))
                 .andExpect(jsonPath("$.record.rerunCount").value(1))
                 .andExpect(jsonPath("$.record.attempts").value(1))
-                .andExpect(jsonPath("$.record.lastTerminationReason").value("NON_RETRYABLE"));
-        log.info("[测试] 幂等键={} 重跑轮数=1 判定依据=HTTP 202 重新入队,上轮终止原因保留", key);
+                .andExpect(jsonPath("$.record.lastTerminationReason").value("NON_RETRYABLE"))
+                // 重跑已入队、新轮尚未跑完：历史里仍完整保留首轮（round=0）的终止归档
+                .andExpect(jsonPath("$.record.roundHistory.length()").value(1))
+                .andExpect(jsonPath("$.record.roundHistory[0].round").value(0))
+                .andExpect(jsonPath("$.record.roundHistory[0].attempts").value(1))
+                .andExpect(jsonPath("$.record.roundHistory[0].outcome").value("TERMINATED"))
+                .andExpect(jsonPath("$.record.roundHistory[0].terminationReason").value("NON_RETRYABLE"));
+        log.info("[测试] 幂等键={} 重跑轮数=1 判定依据=HTTP 202 重新入队,首轮终止归档在roundHistory中独立保留", key);
 
         // 排队中再发重跑 -> 409 NOT_TERMINATED（与轮数到顶可区分）
         mockMvc.perform(post("/api/events/" + key + "/rerun"))
@@ -151,7 +157,16 @@ class EventApiIntegrationTest {
         mockMvc.perform(get("/api/events/" + key))
                 .andExpect(jsonPath("$.status").value("TERMINATED"))
                 .andExpect(jsonPath("$.rerunCount").value(1))
-                .andExpect(jsonPath("$.attempts").value(2));
+                .andExpect(jsonPath("$.attempts").value(2))
+                // 两轮终止各占一条历史，互不覆盖：round=0 与 round=1 都能单独看清
+                .andExpect(jsonPath("$.roundHistory.length()").value(2))
+                .andExpect(jsonPath("$.roundHistory[0].round").value(0))
+                .andExpect(jsonPath("$.roundHistory[0].attempts").value(1))
+                .andExpect(jsonPath("$.roundHistory[0].terminationReason").value("NON_RETRYABLE"))
+                .andExpect(jsonPath("$.roundHistory[1].round").value(1))
+                .andExpect(jsonPath("$.roundHistory[1].attempts").value(1))
+                .andExpect(jsonPath("$.roundHistory[1].terminationReason").value("NON_RETRYABLE"));
+        log.info("[测试] 幂等键={} 判定依据=两轮终止各一条roundHistory(round0/round1独立),HTTP逐轮可查", key);
         mockMvc.perform(post("/api/events/" + key + "/rerun"))
                 .andExpect(status().isConflict())
                 .andExpect(jsonPath("$.rejectionReason").value("RERUN_LIMIT_REACHED"));
