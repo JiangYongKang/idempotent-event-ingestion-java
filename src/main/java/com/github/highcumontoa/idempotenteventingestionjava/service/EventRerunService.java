@@ -94,9 +94,10 @@ public class EventRerunService {
             record.setNextAttemptAt(now);
             record.setUpdatedAt(now);
             store.persist();
-            log.info("接受重跑 幂等键={} 重跑轮数={}/{} 累计尝试={} 上轮终止原因={} 判定=重新入队QUEUED",
+            log.info("接受重跑 幂等键={} 重跑轮数={}/{} 累计尝试={} 上轮终止原因={} 已保留历史轮数={} 判定=重新入队QUEUED",
                     idempotencyKey, record.getRerunCount(), properties.getMaxReruns(),
-                    record.getAttempts(), record.getLastTerminationReason());
+                    record.getAttempts(), record.getLastTerminationReason(),
+                    record.getRoundHistory().size());
             return RerunResult.accepted(record);
         }
     }

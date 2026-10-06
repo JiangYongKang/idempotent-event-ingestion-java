@@ -135,12 +135,15 @@ public class EventProcessingService {
             record.setTerminationReason(reason);
             record.setLastTerminationReason(reason);
             record.setLastTerminatedAt(terminatedAt);
+            // 逐轮历史：在终止迁移的同一临界区内归档本轮（轮次=当前 rerunCount），
+            // 之后无论重跑多少轮，每一轮的终止原因/本轮次数/失败信息都各自独立保留。
+            record.archiveCurrentRoundTermination(terminatedAt);
             record.setNextAttemptAt(null);
             record.setUpdatedAt(terminatedAt);
             store.persist();
-            log.warn("幂等键={} 重跑轮数={} 本轮第{}次尝试(累计第{}次) 判定=终止 原因={} 错误={} 本轮上限={}",
+            log.warn("幂等键={} 重跑轮数={} 本轮第{}次尝试(累计第{}次) 判定=终止 原因={} 错误={} 本轮上限={} 已归档历史轮数={}",
                     record.getIdempotencyKey(), record.getRerunCount(), roundAttempt, attempt,
-                    reason, error, backoffPolicy.getMaxAttempts());
+                    reason, error, backoffPolicy.getMaxAttempts(), record.getRoundHistory().size());
         }
         return record;
     }

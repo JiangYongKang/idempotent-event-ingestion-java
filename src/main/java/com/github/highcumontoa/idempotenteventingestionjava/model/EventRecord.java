@@ -3,6 +3,9 @@ package com.github.highcumontoa.idempotenteventingestionjava.model;
 import java.io.Serial;
 import java.io.Serializable;
 import java.time.Instant;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
 import java.util.Objects;
 
 /**
@@ -38,6 +41,12 @@ public class EventRecord implements Serializable {
 
     /** 最近一次进入终止态的原因；重跑会清空 {@link #terminationReason}，但历史终止原因在此保留。 */
     private TerminationReason lastTerminationReason;
+
+    /**
+     * 逐轮终止历史：每轮（首轮或某轮重跑）进入终止态时追加一条，只增不改不删。
+     * 反序列化旧版本数据时该字段为 null，读取时惰性初始化。
+     */
+    private List<RoundTerminationRecord> roundHistory;
 
     /** 最近一次进入终止态的时刻；未终止过为 null。 */
     private Instant lastTerminatedAt;
@@ -134,6 +143,28 @@ public class EventRecord implements Serializable {
 
     public void setLastTerminationReason(TerminationReason lastTerminationReason) {
         this.lastTerminationReason = lastTerminationReason;
+    }
+
+    /**
+     * 把当前轮的终止信息归档为一条逐轮历史。必须在状态迁移为 TERMINATED 的同一临界区内调用，
+     * 归档内容（轮次、本轮次数、失败信息）全部取自当前记录，归档后本轮计数才可被重跑重置。
+     */
+    public void archiveCurrentRoundTermination(Instant terminatedAt) {
+        roundHistory().add(new RoundTerminationRecord(
+                rerunCount, terminationReason, roundAttempts, attempts,
+                lastError, lastErrorRetryable, terminatedAt));
+    }
+
+    /** 逐轮终止历史（只读视图，按轮次升序）。 */
+    public List<RoundTerminationRecord> getRoundHistory() {
+        return Collections.unmodifiableList(roundHistory());
+    }
+
+    private List<RoundTerminationRecord> roundHistory() {
+        if (roundHistory == null) {
+            roundHistory = new ArrayList<>();
+        }
+        return roundHistory;
     }
 
     public Instant getLastTerminatedAt() {

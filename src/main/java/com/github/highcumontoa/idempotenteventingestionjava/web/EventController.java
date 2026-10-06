@@ -138,6 +138,18 @@ public class EventController {
         m.put("terminationReason", r.getTerminationReason());
         m.put("lastTerminationReason", r.getLastTerminationReason());
         m.put("lastTerminatedAt", r.getLastTerminatedAt());
+        // 逐轮终止历史：每一轮重跑的终止原因/本轮处理次数/失败信息各自独立，重启后仍完整。
+        m.put("roundHistory", r.getRoundHistory().stream().map(h -> {
+            Map<String, Object> e = new LinkedHashMap<>();
+            e.put("round", h.getRound());
+            e.put("terminationReason", h.getTerminationReason());
+            e.put("roundAttempts", h.getRoundAttempts());
+            e.put("totalAttemptsAtTermination", h.getTotalAttemptsAtTermination());
+            e.put("lastError", h.getLastError());
+            e.put("lastErrorRetryable", h.isLastErrorRetryable());
+            e.put("terminatedAt", h.getTerminatedAt());
+            return e;
+        }).toList());
         m.put("result", r.getResult());
         m.put("createdAt", r.getCreatedAt());
         m.put("updatedAt", r.getUpdatedAt());
